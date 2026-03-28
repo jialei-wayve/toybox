@@ -43,12 +43,13 @@ export class RestJiraClient implements IJiraClient {
       },
     });
     const text = await res.text();
-    let body: unknown;
+    let parsed: unknown;
     try {
-      body = text ? JSON.parse(text) : {};
+      parsed = text ? JSON.parse(text) : {};
     } catch {
-      body = { errorMessages: [text || `HTTP ${res.status}`] };
+      parsed = { errorMessages: [text || `HTTP ${res.status}`] };
     }
+    const body = parsed as T | { errorMessages?: string[]; errors?: Record<string, unknown> };
     return { ok: res.ok, status: res.status, body };
   }
 
@@ -157,19 +158,53 @@ export class RestJiraClient implements IJiraClient {
     }>(`/issue/${encodeURIComponent(parentKey)}?fields=project,issuetype`);
 
     if (!ok) return null;
-    const projectKey = body.fields?.project?.key;
-    if (!projectKey || !body.id || !body.key) return null;
+    const b = body as {
+      id?: string;
+      key?: string;
+      fields?: {
+        project?: { key?: string };
+        issuetype?: { name?: string };
+      };
+    };
+    const projectKey = b.fields?.project?.key;
+    if (!projectKey || !b.id || !b.key) return null;
     return {
-      id: body.id,
-      key: body.key,
+      id: b.id,
+      key: b.key,
       projectKey,
-      issueTypeName: body.fields?.issuetype?.name ?? "",
+      issueTypeName: b.fields?.issuetype?.name ?? "",
     };
   }
 
   /**
    * Company-managed Jira often links Stories to Epics via "Epic Link", not `parent`.
    */
+  private async resolveAcceptanceCriteriaFieldForStory(
+    projectKey: string
+  ): Promise<{ key: string; meta: { name?: string; schema?: { type?: string } } } | null> {
+    const path =
+      `/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}` +
+      `&issuetypeNames=${encodeURIComponent("Story")}` +
+      `&expand=projects.issuetypes.fields`;
+    const { ok, body } = await this.fetchJson<{
+      projects?: Array<{
+        issuetypes?: Array<{
+          fields?: Record<string, { name?: string; schema?: { type?: string } }>;
+        }>;
+      }>;
+    }>(path);
+    if (!ok) return null;
+    const data = body as {
+      projects?: Array<{
+        issuetypes?: Array<{
+          fields?: Record<string, { name?: string; schema?: { type?: string } }>;
+        }>;
+      }>;
+    };
+    const fields = data.projects?.[0]?.issuetypes?.[0]?.fields;
+    return this.findAcceptanceCriteriaFieldInMeta(fields);
+  }
+
   private async findEpicLinkFieldKey(projectKey: string): Promise<string | null> {
     const path =
       `/issue/createmeta?projectKeys=${encodeURIComponent(projectKey)}` +
@@ -184,7 +219,14 @@ export class RestJiraClient implements IJiraClient {
     }>(path);
 
     if (!ok) return null;
-    const fields = body.projects?.[0]?.issuetypes?.[0]?.fields;
+    const data = body as {
+      projects?: Array<{
+        issuetypes?: Array<{
+          fields?: Record<string, { name?: string } | undefined>;
+        }>;
+      }>;
+    };
+    const fields = data.projects?.[0]?.issuetypes?.[0]?.fields;
     if (!fields) return null;
 
     for (const [fieldKey, meta] of Object.entries(fields)) {
@@ -197,6 +239,52 @@ export class RestJiraClient implements IJiraClient {
     }
     if (fields.customfield_10014) return "customfield_10014";
     return null;
+  }
+
+  private matchesAcceptanceCriteriaFieldName(name: string): boolean {
+    const n = name.trim().toLowerCase();
+    if (!n) return false;
+    return n.includes("acceptance") && n.includes("criter");
+  }
+
+  private findAcceptanceCriteriaFieldInMeta(
+    fields: Record<string, { name?: string; schema?: { type?: string } }> | undefined
+  ): { key: string; meta: { name?: string; schema?: { type?: string } } } | null {
+    if (!fields) return null;
+    if (this.config.acceptanceCriteriaFieldId) {
+      const k = this.config.acceptanceCriteriaFieldId;
+      const meta = fields[k];
+      return { key: k, meta: meta ?? {} };
+    }
+    for (const [fieldKey, meta] of Object.entries(fields)) {
+      const name = (meta?.name ?? "").trim();
+      if (this.matchesAcceptanceCriteriaFieldName(name)) {
+        return { key: fieldKey, meta: meta ?? {} };
+      }
+    }
+    return null;
+  }
+
+  private acceptanceCriteriaMarkdownToJiraValue(
+    markdown: string,
+    fieldMeta?: { schema?: { type?: string } }
+  ): unknown {
+    const schemaType = fieldMeta?.schema?.type ?? "";
+    if (schemaType === "string") {
+      return markdown
+        .replace(/\*\*([^*]+)\*\*/g, "$1")
+        .trim();
+    }
+    return plainTextToAdf(markdown);
+  }
+
+  private issueFieldValueToEditorPlain(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "object" && (value as { type?: string }).type === "doc") {
+      return adfDocumentToPlainText(value);
+    }
+    return "";
   }
 
   private formatCreateError(
@@ -244,6 +332,20 @@ export class RestJiraClient implements IJiraClient {
       description,
       issuetype: { name: "Story" },
     };
+
+    const acMarkdown = params.acceptanceCriteria?.trim();
+    if (acMarkdown) {
+      const acField = await this.resolveAcceptanceCriteriaFieldForStory(ctx.projectKey);
+      if (!acField) {
+        throw new Error(
+          "Could not find an Acceptance Criteria field for Stories in this project. Set JIRA_ACCEPTANCE_CRITERIA_FIELD to your custom field id (e.g. customfield_10017)."
+        );
+      }
+      baseFields[acField.key] = this.acceptanceCriteriaMarkdownToJiraValue(
+        acMarkdown,
+        acField.meta
+      );
+    }
 
     const attempts: Array<{ label: string; fields: Record<string, unknown> }> = [
       { label: "parent.key", fields: { ...baseFields, parent: { key: ctx.key } } },
@@ -302,27 +404,31 @@ export class RestJiraClient implements IJiraClient {
   }
 
   async getIssueForRefine(issueKey: string): Promise<JiraIssueForRefine | null> {
+    const { ok: emOk, body: emBody } = await this.fetchJson<{
+      fields?: Record<string, { name?: string; schema?: { type?: string } }>;
+    }>(`/issue/${encodeURIComponent(issueKey)}/editmeta`);
+
+    const resolvedAc = emOk
+      ? this.findAcceptanceCriteriaFieldInMeta(
+          (emBody as { fields?: Record<string, { name?: string; schema?: { type?: string } }> })
+            .fields
+        )
+      : null;
+
+    const fieldList = ["summary", "description", "issuetype", "status", "project"];
+    if (resolvedAc) fieldList.push(resolvedAc.key);
+
     const { ok, body } = await this.fetchJson<{
       id?: string;
       key?: string;
-      fields?: {
-        summary?: string;
-        description?: unknown;
-        issuetype?: { name?: string };
-        status?: { name?: string };
-      };
-    }>(`/issue/${encodeURIComponent(issueKey)}?fields=summary,description,issuetype,status`);
+      fields?: Record<string, unknown>;
+    }>(`/issue/${encodeURIComponent(issueKey)}?fields=${fieldList.join(",")}`);
 
     if (!ok) return null;
     const b = body as {
       id: string;
       key: string;
-      fields?: {
-        summary?: string;
-        description?: unknown;
-        issuetype?: { name?: string };
-        status?: { name?: string };
-      };
+      fields?: Record<string, unknown>;
     };
     if (!b.id || !b.key) return null;
 
@@ -336,27 +442,61 @@ export class RestJiraClient implements IJiraClient {
       descriptionPlain = adfDocumentToPlainText(rawDesc);
     }
 
+    let acceptanceCriteriaPlain = "";
+    if (resolvedAc) {
+      const rawAc = b.fields?.[resolvedAc.key];
+      acceptanceCriteriaPlain = this.issueFieldValueToEditorPlain(rawAc).trim();
+    }
+
     return {
       key: b.key,
       id: b.id,
-      summary: b.fields?.summary ?? "",
-      issueType: b.fields?.issuetype?.name ?? "Unknown",
-      status: b.fields?.status?.name ?? "Unknown",
+      summary: (b.fields?.summary as string | undefined) ?? "",
+      issueType:
+        (b.fields?.issuetype as { name?: string } | undefined)?.name ?? "Unknown",
+      status: (b.fields?.status as { name?: string } | undefined)?.name ?? "Unknown",
       descriptionPlain,
+      acceptanceCriteriaPlain,
     };
   }
 
-  async updateIssueDescription(issueKey: string, description: string): Promise<void> {
+  async updateIssueDescription(
+    issueKey: string,
+    description: string,
+    options?: { acceptanceCriteria?: string }
+  ): Promise<void> {
+    const fields: Record<string, unknown> = {
+      description: plainTextToAdf(description),
+    };
+
+    const acMarkdown = options?.acceptanceCriteria?.trim();
+    if (acMarkdown) {
+      const { ok: emOk, body: emBody } = await this.fetchJson<{
+        fields?: Record<string, { name?: string; schema?: { type?: string } }>;
+      }>(`/issue/${encodeURIComponent(issueKey)}/editmeta`);
+      if (!emOk) {
+        throw new Error(`Could not load edit metadata for ${issueKey}`);
+      }
+      const resolved = this.findAcceptanceCriteriaFieldInMeta(
+        (emBody as { fields?: Record<string, { name?: string; schema?: { type?: string } }> }).fields
+      );
+      if (!resolved) {
+        throw new Error(
+          "No Acceptance Criteria field found on this issue. Set JIRA_ACCEPTANCE_CRITERIA_FIELD in .env to your custom field id if discovery fails."
+        );
+      }
+      fields[resolved.key] = this.acceptanceCriteriaMarkdownToJiraValue(
+        acMarkdown,
+        resolved.meta
+      );
+    }
+
     const { ok, status, body } = await this.fetchJson<{
       errorMessages?: string[];
       errors?: Record<string, unknown>;
     }>(`/issue/${encodeURIComponent(issueKey)}`, {
       method: "PUT",
-      body: JSON.stringify({
-        fields: {
-          description: plainTextToAdf(description),
-        },
-      }),
+      body: JSON.stringify({ fields }),
     });
     if (ok) return;
     const err = body as { errorMessages?: string[]; errors?: Record<string, unknown> };

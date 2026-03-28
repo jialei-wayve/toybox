@@ -39,6 +39,7 @@ export async function getIssueByKey(key: string): Promise<JiraIssueSummary> {
 export async function generateGherkin(text: string): Promise<{
   gherkin: string;
   suggestedSummary: string;
+  acceptanceCriteria: string[];
 }> {
   const res = await fetch(`${base}/api/gherkin/generate`, {
     method: "POST",
@@ -49,12 +50,23 @@ export async function generateGherkin(text: string): Promise<{
     ok: boolean;
     gherkin?: string;
     suggestedSummary?: string;
+    acceptanceCriteria?: string[];
     error?: string;
   }>(res);
-  if (!res.ok || !data.ok || !data.gherkin || data.suggestedSummary === undefined) {
+  if (
+    !res.ok ||
+    !data.ok ||
+    !data.gherkin ||
+    data.suggestedSummary === undefined ||
+    !Array.isArray(data.acceptanceCriteria)
+  ) {
     throw new Error(data.error || `Generate failed (${res.status})`);
   }
-  return { gherkin: data.gherkin, suggestedSummary: data.suggestedSummary };
+  return {
+    gherkin: data.gherkin,
+    suggestedSummary: data.suggestedSummary,
+    acceptanceCriteria: data.acceptanceCriteria,
+  };
 }
 
 export async function getIssueForRefine(key: string): Promise<JiraIssueForRefine> {
@@ -74,14 +86,18 @@ export async function getIssueForRefine(key: string): Promise<JiraIssueForRefine
 
 export async function updateIssueDescription(
   key: string,
-  description: string
+  description: string,
+  acceptanceCriteria?: string
 ): Promise<void> {
   const res = await fetch(
     `${base}/api/jira/issue/${encodeURIComponent(key)}/description`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({
+        description,
+        ...(acceptanceCriteria !== undefined ? { acceptanceCriteria } : {}),
+      }),
     }
   );
   const data = await parseJson<{ ok: boolean; error?: string }>(res);
@@ -94,6 +110,7 @@ export async function createStory(params: {
   parentKey: string;
   summary: string;
   description: string;
+  acceptanceCriteria?: string;
 }): Promise<JiraCreateStoryResult> {
   const res = await fetch(`${base}/api/jira/stories`, {
     method: "POST",

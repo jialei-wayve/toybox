@@ -15,6 +15,7 @@ export interface JiraIssueForRefine {
   issueType: string;
   status: string;
   descriptionPlain: string;
+  acceptanceCriteriaPlain: string;
 }
 
 export interface JiraCreateStoryResult {
@@ -24,9 +25,7 @@ export interface JiraCreateStoryResult {
   browseUrl: string;
 }
 
-export interface ApiOk<T> {
-  ok: true;
-} & T;
+export type ApiOk<T> = { ok: true } & T;
 
 export interface ApiErr {
   ok: false;

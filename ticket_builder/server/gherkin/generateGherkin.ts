@@ -4,6 +4,8 @@
  * Replace with an LLM behind the same export for richer output.
  */
 
+import { generateAcceptanceCriteria } from "./generateAcceptanceCriteria.js";
+
 export interface GherkinGenerationInput {
   rawText: string;
 }
@@ -11,6 +13,8 @@ export interface GherkinGenerationInput {
 export interface GherkinGenerationResult {
   gherkin: string;
   suggestedSummary: string;
+  /** Exactly three paragraphs; Gherkin keywords only are markdown-bold */
+  acceptanceCriteria: string[];
 }
 
 function nonEmptyLines(text: string): string[] {
@@ -93,5 +97,7 @@ export function generateGherkinFromText(input: GherkinGenerationInput): GherkinG
   const suggestedSummary =
     featureTitle.length <= 120 ? featureTitle : `${featureTitle.slice(0, 117)}…`;
 
-  return { gherkin, suggestedSummary };
+  const acceptanceCriteria = generateAcceptanceCriteria({ rawText: raw, gherkin });
+
+  return { gherkin, suggestedSummary, acceptanceCriteria };
 }

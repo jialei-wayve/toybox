@@ -16,7 +16,10 @@ function readConfig(): JiraClientConfig {
     );
   }
 
-  return { cloudId, siteBaseUrl, email, apiToken };
+  const acceptanceCriteriaFieldId =
+    process.env.JIRA_ACCEPTANCE_CRITERIA_FIELD?.trim() || undefined;
+
+  return { cloudId, siteBaseUrl, email, apiToken, acceptanceCriteriaFieldId };
 }
 
 export function createJiraClient(): IJiraClient {

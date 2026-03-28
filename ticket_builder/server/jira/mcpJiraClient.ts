@@ -41,7 +41,11 @@ export class McpJiraClient implements IJiraClient {
     );
   }
 
-  async updateIssueDescription(_issueKey: string, _description: string): Promise<void> {
+  async updateIssueDescription(
+    _issueKey: string,
+    _description: string,
+    _options?: { acceptanceCriteria?: string }
+  ): Promise<void> {
     throw new Error(
       "McpJiraClient is not wired. Use JIRA_BACKEND=rest or implement MCP transport (see README)."
     );

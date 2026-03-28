@@ -17,6 +17,12 @@ export interface JiraCreateStoryParams {
   summary: string;
   /** Plain text or Gherkin — converted to ADF for Jira */
   description: string;
+  /**
+   * Three paragraphs (blank line separated), markdown **bold** for Gherkin keywords only.
+   * Stored in the project's Acceptance Criteria custom field when discoverable or when
+   * `JIRA_ACCEPTANCE_CRITERIA_FIELD` is set.
+   */
+  acceptanceCriteria?: string;
 }
 
 export interface JiraCreateStoryResult {
@@ -34,6 +40,8 @@ export interface JiraIssueForRefine {
   issueType: string;
   status: string;
   descriptionPlain: string;
+  /** Plain + **bold** markers when loaded from ADF; empty if field missing */
+  acceptanceCriteriaPlain: string;
 }
 
 export interface JiraClientConfig {
@@ -42,4 +50,6 @@ export interface JiraClientConfig {
   apiToken: string;
   /** Optional; used by future MCP or OAuth-style adapters */
   cloudId?: string;
+  /** Optional custom field id (e.g. customfield_10017) for Acceptance Criteria */
+  acceptanceCriteriaFieldId?: string;
 }

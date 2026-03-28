@@ -22,6 +22,14 @@ interface SessionCreatedTicket {
 
 const SESSION_TICKETS_STORAGE_KEY = "toybox:session-created-tickets";
 
+function splitAcceptanceCriteriaParagraphs(text: string): string[] {
+  return text
+    .trim()
+    .split(/\n\s*\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
 /** When the summary box is empty, Jira still needs a summary — derive from Gherkin (Feature: line, etc.). */
 function deriveSummaryFromGherkin(text: string): string {
   const lines = text.split(/\r?\n/).map((l) => l.trim());
@@ -72,6 +80,7 @@ export default function App() {
 
   const [rawInput, setRawInput] = useState("");
   const [gherkinDraft, setGherkinDraft] = useState("");
+  const [acceptanceCriteriaDraft, setAcceptanceCriteriaDraft] = useState("");
   const [summary, setSummary] = useState("");
 
   const [genLoading, setGenLoading] = useState(false);
@@ -191,6 +200,7 @@ export default function App() {
           : issue.summary;
       setRawInput(seed);
       setGherkinDraft("");
+      setAcceptanceCriteriaDraft(issue.acceptanceCriteriaPlain.trim());
       setSummary(issue.summary);
       setStatusTone("idle");
       setStatusTitle("Ready");
@@ -219,13 +229,16 @@ export default function App() {
     setStatusTitle("Generating Gherkin…");
     setStatusDetail(null);
     try {
-      const { gherkin, suggestedSummary } = await generateGherkin(text);
+      const { gherkin, suggestedSummary, acceptanceCriteria } = await generateGherkin(text);
       setGherkinDraft(gherkin);
+      setAcceptanceCriteriaDraft(acceptanceCriteria.join("\n\n"));
       setSummary(suggestedSummary);
       setStatusTone("idle");
       setStatusTitle("Gherkin ready for review");
-      setStatusDetail("Edit the text below if needed, then set the story summary and click Accept.");
-      pushAudit("Generated Gherkin from raw input");
+      setStatusDetail(
+        "Edit Gherkin and acceptance criteria if needed, then set the story summary (new ticket) and click Accept."
+      );
+      pushAudit("Generated Gherkin and acceptance criteria from raw input");
     } catch (e) {
       setStatusTone("error");
       setStatusTitle("Generation failed");
@@ -245,6 +258,17 @@ export default function App() {
       return;
     }
 
+    const acParagraphs = splitAcceptanceCriteriaParagraphs(acceptanceCriteriaDraft);
+    if (acParagraphs.length !== 3) {
+      setStatusTone("error");
+      setStatusTitle("Validation");
+      setStatusDetail(
+        "Acceptance criteria must contain exactly three non-empty paragraphs separated by a blank line."
+      );
+      return;
+    }
+    const acceptanceCriteriaForJira = acParagraphs.join("\n\n");
+
     if (tab === "refine") {
       if (!refineLoaded) {
         setStatusTone("error");
@@ -257,11 +281,11 @@ export default function App() {
       setStatusTitle("Updating description…");
       setStatusDetail(null);
       try {
-        await updateIssueDescription(refineLoaded.key, desc);
+        await updateIssueDescription(refineLoaded.key, desc, acceptanceCriteriaForJira);
         setStatusTone("idle");
         setStatusTitle("Ready");
-        setStatusDetail(`Updated description on ${refineLoaded.key}.`);
-        pushAudit(`Refine: updated description on ${refineLoaded.key}`);
+        setStatusDetail(`Updated description and acceptance criteria on ${refineLoaded.key}.`);
+        pushAudit(`Refine: updated description and acceptance criteria on ${refineLoaded.key}`);
       } catch (e) {
         setStatusTone("error");
         setStatusTitle("Update failed");
@@ -298,6 +322,7 @@ export default function App() {
         parentKey: parent.key,
         summary: sum,
         description: desc,
+        acceptanceCriteria: acceptanceCriteriaForJira,
       });
       const parentBrowseUrl = `${issue.browseUrl.replace(/\/browse\/[^/]+$/, "")}/browse/${parent.key}`;
       setSessionCreatedTickets((items) => [
@@ -344,6 +369,7 @@ export default function App() {
   const resetFlow = () => {
     setRawInput("");
     setGherkinDraft("");
+    setAcceptanceCriteriaDraft("");
     setSummary("");
     setParent(null);
     setSearchQuery("");
@@ -396,9 +422,15 @@ export default function App() {
     [summary, gherkinDraft]
   );
 
+  const acceptanceParagraphCount = useMemo(
+    () => splitAcceptanceCriteriaParagraphs(acceptanceCriteriaDraft).length,
+    [acceptanceCriteriaDraft]
+  );
+
   const acceptDisabled = useMemo(() => {
     if (submitLoading) return true;
     if (!gherkinDraft.trim()) return true;
+    if (acceptanceParagraphCount !== 3) return true;
     if (tab === "refine") {
       return !refineLoaded;
     }
@@ -410,6 +442,7 @@ export default function App() {
     gherkinDraft,
     effectiveSummary,
     submitLoading,
+    acceptanceParagraphCount,
   ]);
 
   const acceptDisabledReason = useMemo(() => {
@@ -417,6 +450,9 @@ export default function App() {
       return tab === "refine" ? "Saving description…" : "Creating story…";
     }
     if (!gherkinDraft.trim()) return "Add Gherkin text for the Jira description.";
+    if (acceptanceParagraphCount !== 3) {
+      return "Acceptance criteria need exactly three paragraphs separated by a blank line.";
+    }
     if (tab === "refine") {
       return refineLoaded ? undefined : "Load an existing ticket first.";
     }
@@ -425,7 +461,15 @@ export default function App() {
       return "Add a Story summary, or a Feature: line in the Gherkin.";
     }
     return undefined;
-  }, [tab, refineLoaded, parent, gherkinDraft, effectiveSummary, submitLoading]);
+  }, [
+    tab,
+    refineLoaded,
+    parent,
+    gherkinDraft,
+    effectiveSummary,
+    submitLoading,
+    acceptanceParagraphCount,
+  ]);
 
   return (
     <>
@@ -654,6 +698,23 @@ export default function App() {
               value={gherkinDraft}
               onChange={(e) => setGherkinDraft(e.target.value)}
             />
+
+            <label className="field-label" htmlFor="acceptance-criteria" style={{ marginTop: "0.75rem" }}>
+              Acceptance criteria (three paragraphs, Gherkin keywords in **bold**)
+            </label>
+            <textarea
+              id="acceptance-criteria"
+              className="gherkin-editor"
+              style={{ minHeight: "7rem" }}
+              value={acceptanceCriteriaDraft}
+              onChange={(e) => setAcceptanceCriteriaDraft(e.target.value)}
+              placeholder="Generate from requirement to fill three paragraphs. Separate each criterion with a blank line."
+            />
+            <p className="muted" style={{ marginTop: "0.35rem" }}>
+              Bold only Gherkin keywords: Given, When, Then, And, But, As a, I want, So that (wrap each
+              keyword in **double asterisks** in the text). Paragraphs: {acceptanceParagraphCount} / 3.
+            </p>
+
             {tab === "new" ? (
               <>
                 <label className="field-label" htmlFor="summary" style={{ marginTop: "0.75rem" }}>

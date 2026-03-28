@@ -17,7 +17,11 @@ export interface IJiraClient {
   createStoryUnderParent(params: JiraCreateStoryParams): Promise<JiraCreateStoryResult>;
   getIssue(key: string): Promise<JiraIssueSummary | null>;
   getIssueForRefine(key: string): Promise<JiraIssueForRefine | null>;
-  updateIssueDescription(issueKey: string, description: string): Promise<void>;
+  updateIssueDescription(
+    issueKey: string,
+    description: string,
+    options?: { acceptanceCriteria?: string }
+  ): Promise<void>;
 }
 
 export type { JiraClientConfig };
